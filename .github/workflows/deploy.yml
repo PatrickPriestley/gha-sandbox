@@ -1,0 +1,179 @@
+name: Deploy Release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      deploy_staging:
+        type: boolean
+        default: true
+        required: false
+      deploy_production:
+        type: boolean
+        default: true
+        required: false
+  # Allow manual triggers for specific environment deployments
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to deploy (e.g., v1.0.0)'
+        required: true
+        type: string
+      deploy_staging:
+        description: 'Deploy to staging'
+        type: boolean
+        default: true
+        required: false
+      deploy_production:
+        description: 'Deploy to production'
+        type: boolean
+        default: true
+        required: false
+
+jobs:
+  deploy-staging:
+    if: inputs.deploy_staging
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run pre-deployment checks
+        run: |
+          echo "Running pre-deployment checks for staging"
+          npm run validate:staging
+
+      - name: Deploy to staging
+        run: |
+          echo "Deploying ${{ inputs.version }} to staging"
+          npm run deploy:staging
+
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests in staging"
+          npm run test:smoke:staging
+
+      - name: Monitor deployment
+        run: |
+          echo "Monitoring staging deployment"
+          npm run monitor:staging
+
+      - name: Notify deployment status
+        if: always()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "${{ inputs.version }} staging deployment ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Staging Deployment Status Update*\n${{ inputs.version }} ${{ job.status }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  deploy-production:
+    if: inputs.deploy_production
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run pre-deployment checks
+        run: |
+          echo "Running pre-deployment checks for production"
+          npm run validate:production
+
+      - name: Deploy to production
+        run: |
+          echo "Deploying ${{ inputs.version }} to production"
+          npm run deploy:production
+
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests in production"
+          npm run test:smoke:production
+
+      - name: Monitor deployment
+        run: |
+          echo "Monitoring production deployment"
+          npm run monitor:production
+
+      - name: Notify deployment status
+        if: always()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "${{ inputs.version }} production deployment ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Production Deployment Status Update*\n${{ inputs.version }} ${{ job.status }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  notify-completion:
+    needs: [deploy-staging, deploy-production]
+    if: always() && (needs.deploy-staging.result != 'skipped' || needs.deploy-production.result != 'skipped')
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Notify overall status
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "Deployment Status Summary for ${{ inputs.version }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Deployment Status Summary for ${{ inputs.version }}*\n${{ needs.deploy-staging.result != 'skipped' && format('Staging: {0}', needs.deploy-staging.result) || 'Staging: Not deployed' }}\n${{ needs.deploy-production.result != 'skipped' && format('Production: {0}', needs.deploy-production.result) || 'Production: Not deployed' }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} 

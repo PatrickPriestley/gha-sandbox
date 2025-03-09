@@ -1,0 +1,90 @@
+name: Hotfix Process
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_version:
+        description: 'Base version to create hotfix from (e.g., v1.0.0)'
+        required: true
+        type: string
+      hotfix_version:
+        description: 'New hotfix version (e.g., 1.0.1)'
+        required: true
+        type: string
+
+jobs:
+  create-hotfix:
+    runs-on: ubuntu-latest
+    outputs:
+      branch_name: ${{ steps.create_branch.outputs.branch_name }}
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate versions
+        run: |
+          if ! [[ ${{ github.event.inputs.base_version }} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid base version format. Must be in format vX.Y.Z"
+            exit 1
+          fi
+          if ! [[ ${{ github.event.inputs.hotfix_version }} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid hotfix version format. Must be in format X.Y.Z"
+            exit 1
+          fi
+
+      - name: Create hotfix branch
+        id: create_branch
+        run: |
+          BRANCH_NAME="hotfix/v${{ github.event.inputs.hotfix_version }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          git checkout ${{ github.event.inputs.base_version }}
+          git checkout -b $BRANCH_NAME
+          git push -u origin $BRANCH_NAME
+
+      - name: Create PR template
+        run: |
+          echo "## Hotfix PR for v${{ github.event.inputs.hotfix_version }}" > .github/PULL_REQUEST_TEMPLATE.md
+          echo "" >> .github/PULL_REQUEST_TEMPLATE.md
+          echo "This is a hotfix branch created from ${{ github.event.inputs.base_version }}" >> .github/PULL_REQUEST_TEMPLATE.md
+          echo "" >> .github/PULL_REQUEST_TEMPLATE.md
+          echo "### Changes" >> .github/PULL_REQUEST_TEMPLATE.md
+          echo "- [ ] List your changes here" >> .github/PULL_REQUEST_TEMPLATE.md
+          echo "" >> .github/PULL_REQUEST_TEMPLATE.md
+          echo "### Testing" >> .github/PULL_REQUEST_TEMPLATE.md
+          echo "- [ ] Describe how these changes were tested" >> .github/PULL_REQUEST_TEMPLATE.md
+          git add .github/PULL_REQUEST_TEMPLATE.md
+          git commit -m "chore: add PR template for hotfix"
+          git push origin ${{ steps.create_branch.outputs.branch_name }}
+
+  notify-team:
+    needs: create-hotfix
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "Hotfix branch created",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Hotfix branch created*\nBranch: `${{ needs.create-hotfix.outputs.branch_name }}`\nBase version: `${{ github.event.inputs.base_version }}`\nTarget version: `v${{ github.event.inputs.hotfix_version }}`"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "Please make your changes in this branch and create a PR when ready."
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} 
