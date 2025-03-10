@@ -158,43 +158,44 @@ jobs:
           # env:
           #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
-  set-deployment-vars:
+  deploy-staging2:
     needs: prepare-release
-    if: ${{ !inputs.is_hotfix }}
+    if: ${{ !inputs.is_hotfix && inputs.deploy_staging2 }}
     runs-on: ubuntu-latest
-    outputs:
-      staging2: ${{ steps.set-vars.outputs.staging2 }}
-      production: ${{ steps.set-vars.outputs.production }}
-      destructive: ${{ steps.set-vars.outputs.destructive }}
+    environment: staging2
     steps:
-      - id: set-vars
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: v${{ inputs.version }}
+          fetch-depth: 0
+      
+      - name: Deploy to staging2
         run: |
-          # Convert boolean inputs to string values
-          if [ "${{ inputs.deploy_staging2 }}" = "true" ]; then
-            echo "staging2=true" >> $GITHUB_OUTPUT
-          else
-            echo "staging2=false" >> $GITHUB_OUTPUT
-          fi
+          echo "SIMULATED: Would deploy v${{ inputs.version }} to staging2"
+          echo "Version Tag: v${{ inputs.version }}"
+          echo "Destructive Changes: ${{ inputs.destructive_changes }}"
+          # Real deployment steps would go here
           
-          if [ "${{ inputs.deploy_production }}" = "true" ]; then
-            echo "production=true" >> $GITHUB_OUTPUT
-          else
-            echo "production=false" >> $GITHUB_OUTPUT
-          fi
-          
-          if [ "${{ inputs.destructive_changes }}" = "true" ]; then
-            echo "destructive=true" >> $GITHUB_OUTPUT
-          else
-            echo "destructive=false" >> $GITHUB_OUTPUT
-          fi
-  
-  trigger-deployment:
-    needs: [prepare-release, set-deployment-vars]
-    if: ${{ !inputs.is_hotfix }}
-    uses: ./.github/workflows/deploy-salesforce.yml
-    with:
-      version_tag: v${{ inputs.version }}
-      deploy_staging2: ${{ needs.set-deployment-vars.outputs.staging2 }}
-      deploy_production: ${{ needs.set-deployment-vars.outputs.production }}
-      destructive_changes: ${{ needs.set-deployment-vars.outputs.destructive }}
-    secrets: inherit
+      - name: Run tests
+        run: |
+          echo "SIMULATED: Would run tests in staging2"
+
+  deploy-production:
+    needs: [prepare-release, deploy-staging2]
+    if: ${{ !inputs.is_hotfix && inputs.deploy_production }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: v${{ inputs.version }}
+          fetch-depth: 0
+      
+      - name: Deploy to production
+        run: |
+          echo "SIMULATED: Would deploy v${{ inputs.version }} to production"
+          echo "Version Tag: v${{ inputs.version }}"
+          echo "Destructive Changes: ${{ inputs.destructive_changes }}"
+          # Real deployment steps would go here
