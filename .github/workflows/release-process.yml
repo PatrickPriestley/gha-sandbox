@@ -204,9 +204,10 @@ jobs:
 
   trigger-deployment:
     needs: [prepare-release, create-release]
-    uses: ./.github/workflows/deploy.yml
+    uses: ./.github/workflows/deploy-salesforce.yml
     with:
-      version: ${{ needs.prepare-release.outputs.version_tag }}
-      deploy_staging: ${{ github.event.inputs.deploy_staging }}
+      version_tag: ${{ needs.prepare-release.outputs.version_tag }}
+      deploy_staging2: ${{ github.event.inputs.deploy_staging2 }}
       deploy_production: ${{ github.event.inputs.deploy_production }}
+      destructive_changes: ${{ github.event.inputs.destructive_changes }}
     secrets: inherit
