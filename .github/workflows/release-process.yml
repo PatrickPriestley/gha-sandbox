@@ -157,14 +157,44 @@ jobs:
           #     }
           # env:
           #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  set-deployment-vars:
+    needs: prepare-release
+    if: ${{ !inputs.is_hotfix }}
+    runs-on: ubuntu-latest
+    outputs:
+      staging2: ${{ steps.set-vars.outputs.staging2 }}
+      production: ${{ steps.set-vars.outputs.production }}
+      destructive: ${{ steps.set-vars.outputs.destructive }}
+    steps:
+      - id: set-vars
+        run: |
+          # Convert boolean inputs to string values
+          if [ "${{ inputs.deploy_staging2 }}" = "true" ]; then
+            echo "staging2=true" >> $GITHUB_OUTPUT
+          else
+            echo "staging2=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if [ "${{ inputs.deploy_production }}" = "true" ]; then
+            echo "production=true" >> $GITHUB_OUTPUT
+          else
+            echo "production=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if [ "${{ inputs.destructive_changes }}" = "true" ]; then
+            echo "destructive=true" >> $GITHUB_OUTPUT
+          else
+            echo "destructive=false" >> $GITHUB_OUTPUT
+          fi
   
   trigger-deployment:
-    needs: prepare-release
+    needs: [prepare-release, set-deployment-vars]
     if: ${{ !inputs.is_hotfix }}
     uses: ./.github/workflows/deploy-salesforce.yml
     with:
       version_tag: v${{ inputs.version }}
-      deploy_staging2: 'true'
-      deploy_production: 'false'
-      destructive_changes: 'false'
+      deploy_staging2: ${{ needs.set-deployment-vars.outputs.staging2 }}
+      deploy_production: ${{ needs.set-deployment-vars.outputs.production }}
+      destructive_changes: ${{ needs.set-deployment-vars.outputs.destructive }}
     secrets: inherit
