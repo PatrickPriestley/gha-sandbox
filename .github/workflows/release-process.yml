@@ -164,7 +164,7 @@ jobs:
     uses: ./.github/workflows/deploy-salesforce.yml
     with:
       version_tag: v${{ inputs.version }}
-      deploy_staging2: ${{ toJSON(github.event.inputs.deploy_staging2) }}
-      deploy_production: ${{ toJSON(github.event.inputs.deploy_production) }}
-      destructive_changes: ${{ toJSON(github.event.inputs.destructive_changes) }}
-    secrets: inherit        
+      deploy_staging2: ${{ (inputs.deploy_staging2 && 'true') || 'false' }}
+      deploy_production: ${{ (inputs.deploy_production && 'true') || 'false' }}
+      destructive_changes: ${{ (inputs.destructive_changes && 'true') || 'false' }}
+    secrets: inherit
