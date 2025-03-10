@@ -102,68 +102,14 @@ jobs:
       
       - name: Create tag directly (for non-hotfixes)
         if: ${{ !inputs.is_hotfix }}
-        run: |
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "GitHub Actions"
-          git tag -a v${{ inputs.version }} -m "Release v${{ inputs.version }}"
-          git push origin v${{ inputs.version }}
-          echo "Created and pushed tag v${{ inputs.version }}"
-
-  create-release:
-    needs: prepare-release
-    if: ${{ !inputs.is_hotfix }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    steps:
-      - uses: actions/checkout@v4
+        uses: ncipollo/release-action@v1
         with:
-          fetch-depth: 0
-          
-      - name: Generate release notes
-        id: release_notes
-        run: |
-          # Get the previous tag
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -z "$PREV_TAG" ]; then
-            # If no previous tag exists, use the first commit
-            PREV_TAG=$(git rev-list --max-parents=0 HEAD)
-          fi
-          
-          # Generate changelog
-          echo "CHANGELOG<<EOF" >> $GITHUB_ENV
-          echo "## Changes in this release" >> $GITHUB_ENV
-          echo "" >> $GITHUB_ENV
-          git log --pretty=format:"* %s (%h)" $PREV_TAG..HEAD >> $GITHUB_ENV
-          echo "" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          
-      - name: Create GitHub Release
-        run: |
-          echo "SIMULATED: Would create GitHub release for v${{ inputs.version }}"
-          echo "Release notes:"
-          echo "${{ env.CHANGELOG }}"
-          
-          # COMMENTED OUT FOR TESTING
-          # uses: softprops/action-gh-release@v1
-          # with:
-          #   tag_name: v${{ inputs.version }}
-          #   name: Release v${{ inputs.version }}
-          #   body: ${{ env.CHANGELOG }}
-          #   draft: false
-          #   prerelease: false
-
-  deploy:
-    needs: [prepare-release, create-release]
-    if: ${{ !inputs.is_hotfix && (inputs.deploy_staging2 || inputs.deploy_production) }}
-    uses: ./.github/workflows/deploy-salesforce.yml
-    with:
-      version_tag: v${{ inputs.version }}
-      deploy_staging2: ${{ inputs.deploy_staging2 }}
-      deploy_production: ${{ inputs.deploy_production }}
-      destructive_changes: ${{ inputs.destructive_changes }}
-    secrets: inherit
+          tag: v${{ inputs.version }}
+          name: Release v${{ inputs.version }}
+          commit: ${{ inputs.branch }}
+          generateReleaseNotes: true
+          makeLatest: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   notify-hotfix-created:
     needs: prepare-release
@@ -205,10 +151,11 @@ jobs:
           #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
   trigger-deployment:
-    needs: [prepare-release, create-release]
+    needs: prepare-release
+    if: ${{ !inputs.is_hotfix }}
     uses: ./.github/workflows/deploy-salesforce.yml
     with:
-      version_tag: ${{ needs.prepare-release.outputs.version_tag }}
+      version_tag: v${{ inputs.version }}
       deploy_staging2: ${{ github.event.inputs.deploy_staging2 }}
       deploy_production: ${{ github.event.inputs.deploy_production }}
       destructive_changes: ${{ github.event.inputs.destructive_changes }}
