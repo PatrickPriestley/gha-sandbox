@@ -66,6 +66,8 @@ jobs:
   prepare-release:
     needs: validate-inputs
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version_tag: v${{ inputs.version }}
       branch_name: ${{ steps.set_branch.outputs.branch_name }}
