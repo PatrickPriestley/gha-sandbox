@@ -113,11 +113,11 @@ jobs:
           name: Release v${{ inputs.version }}
           commit: ${{ inputs.branch }}
           generateReleaseNotes: true
-          makeLatest: true
+          makeLatest: "legacy"
           token: ${{ secrets.GITHUB_TOKEN }}
-          allowUpdates: false
-          draft: false
-          prerelease: false
+          allowUpdates: "false"
+          draft: "false"
+          prerelease: "false"
 
   notify-hotfix-created:
     needs: prepare-release
