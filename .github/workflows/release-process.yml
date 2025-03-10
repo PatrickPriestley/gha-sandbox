@@ -115,6 +115,9 @@ jobs:
           generateReleaseNotes: true
           makeLatest: true
           token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: false
+          draft: false
+          prerelease: false
 
   notify-hotfix-created:
     needs: prepare-release

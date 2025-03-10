@@ -58,12 +58,17 @@ jobs:
           fetch-depth: 0
       
       - name: Create and push tag
-        run: |
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "GitHub Actions"
-          git tag -a v${{ inputs.version }} -m "Hotfix v${{ inputs.version }}"
-          git push origin v${{ inputs.version }}
-          echo "Created and pushed tag v${{ inputs.version }}"
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ inputs.version }}
+          name: Hotfix v${{ inputs.version }}
+          commit: ${{ inputs.hotfix_branch }}
+          generateReleaseNotes: true
+          makeLatest: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: false
+          draft: false
+          prerelease: true
       
       - name: Generate release notes
         id: release_notes
