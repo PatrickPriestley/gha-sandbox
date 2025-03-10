@@ -157,14 +157,14 @@ jobs:
           #     }
           # env:
           #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-
+  
   trigger-deployment:
     needs: prepare-release
     if: ${{ !inputs.is_hotfix }}
     uses: ./.github/workflows/deploy-salesforce.yml
     with:
       version_tag: v${{ inputs.version }}
-      deploy_staging2: ${{ github.event.inputs.deploy_staging2 }}
-      deploy_production: ${{ github.event.inputs.deploy_production }}
-      destructive_changes: ${{ github.event.inputs.destructive_changes }}
-    secrets: inherit
+      deploy_staging2: ${{ toJSON(github.event.inputs.deploy_staging2) }}
+      deploy_production: ${{ toJSON(github.event.inputs.deploy_production) }}
+      destructive_changes: ${{ toJSON(github.event.inputs.destructive_changes) }}
+    secrets: inherit        
