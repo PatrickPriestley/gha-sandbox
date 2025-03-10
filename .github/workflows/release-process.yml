@@ -105,7 +105,7 @@ jobs:
           echo "Developers should now make changes on this branch and create a PR"
           echo "After PR approval, continue the release process by tagging this branch"
       
-      - name: Create tag directly (for non-hotfixes)
+      - name: Create tag and release (for non-hotfixes)
         if: ${{ !inputs.is_hotfix }}
         uses: ncipollo/release-action@v1
         with:
