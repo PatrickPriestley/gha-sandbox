@@ -201,3 +201,12 @@ jobs:
           #     }
           # env:
           #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  trigger-deployment:
+    needs: [prepare-release, create-release]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      version: ${{ needs.prepare-release.outputs.version_tag }}
+      deploy_staging: ${{ github.event.inputs.deploy_staging }}
+      deploy_production: ${{ github.event.inputs.deploy_production }}
+    secrets: inherit
