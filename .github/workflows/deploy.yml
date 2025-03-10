@@ -1,179 +1,339 @@
-name: Deploy Release
+# deploy-salesforce.yml
+name: Deploy Salesforce
+run-name: Deploy ${{ inputs.version_tag }} to selected environments
 
 on:
   workflow_call:
     inputs:
-      version:
-        required: true
+      version_tag:
+        description: "Tag version to deploy (e.g., v1.0.0)"
         type: string
-      deploy_staging:
+        required: true
+      deploy_staging2:
+        description: "Deploy to staging2"
         type: boolean
         default: true
         required: false
       deploy_production:
+        description: "Deploy to production"
         type: boolean
-        default: true
+        default: false
         required: false
-  # Allow manual triggers for specific environment deployments
+      destructive_changes:
+        description: "Run destructive changes"
+        type: boolean
+        default: false
+        required: false
+  
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version tag to deploy (e.g., v1.0.0)'
-        required: true
+      version_tag:
+        description: "Tag version to deploy (e.g., v1.0.0)"
         type: string
-      deploy_staging:
-        description: 'Deploy to staging'
+        required: true
+      deploy_staging2:
+        description: "Deploy to staging2"
         type: boolean
         default: true
         required: false
       deploy_production:
-        description: 'Deploy to production'
+        description: "Deploy to production"
         type: boolean
-        default: true
+        default: false
+        required: false
+      destructive_changes:
+        description: "Run destructive changes"
+        type: boolean
+        default: false
         required: false
 
 jobs:
-  deploy-staging:
-    if: inputs.deploy_staging
+  determine-environments:
     runs-on: ubuntu-latest
-    environment: staging
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          ENVIRONMENTS=()
+          if [[ "${{ inputs.deploy_staging2 }}" == "true" ]]; then
+            ENVIRONMENTS+=("staging2")
+          fi
+          if [[ "${{ inputs.deploy_production }}" == "true" ]]; then
+            ENVIRONMENTS+=("production")
+          fi
+          
+          # Convert to JSON array for matrix
+          JSON_ARRAY=$(echo "${ENVIRONMENTS[@]}" | jq -R -s -c 'split(" ")')
+          echo "matrix=$JSON_ARRAY" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: determine-environments
+    if: ${{ needs.determine-environments.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ fromJson(needs.determine-environments.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 1  # Ensure staging deploys before production
+    
+    environment: ${{ matrix.environment }}
+    name: Deploy to ${{ matrix.environment }}
     
     steps:
-      - uses: actions/checkout@v4
+      - name: Install Salesforce CLI
+        run: |
+          echo "SIMULATED: Would install Salesforce CLI"
+          # npm install @salesforce/cli --global
+
+      - name: Install plugins
+        run: |
+          echo "SIMULATED: Would install sfdx-git-delta plugin"
+          # echo y | sf plugins:install sfdx-git-delta
+
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.version }}
+          ref: ${{ inputs.version_tag }}
           fetch-depth: 0
+          fetch-tags: true
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Install GitHub CLI
+        run: |
+          type -p curl >/dev/null || (apt update && apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+            || echo "Failed to download GitHub CLI keyring"
+          chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          apt update
+          apt install gh -y
+
+      - name: Determine base for delta calculation
+        id: determine_base
+        run: |
+          VERSION_TAG="${{ inputs.version_tag }}"
+          
+          # Check if this is a version tag with semantic versioning
+          if [[ $VERSION_TAG =~ v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            
+            if [ "$PATCH" -gt "0" ]; then
+              # This is a hotfix - compare against the base version
+              BASE_VERSION="v${MAJOR}.${MINOR}.0"
+              echo "This is a hotfix ($VERSION_TAG). Using base version $BASE_VERSION for comparison"
+              
+              if git rev-parse --verify $BASE_VERSION >/dev/null 2>&1; then
+                echo "base_sha=$(git rev-list -n 1 $BASE_VERSION)" >> $GITHUB_OUTPUT
+                echo "compare_to=$BASE_VERSION" >> $GITHUB_OUTPUT
+              else
+                echo "Base version $BASE_VERSION not found. Falling back to environment tracking."
+                # Try to get environment variable
+                VAR_NAME="LAST_DEPLOYED_SHA_${{ matrix.environment }}"
+                LAST_SHA=$(gh variable get $VAR_NAME --env ${{ matrix.environment }} 2>/dev/null || echo "")
+                
+                if [ -n "$LAST_SHA" ]; then
+                  echo "Using last deployed SHA from environment variable"
+                  echo "base_sha=$LAST_SHA" >> $GITHUB_OUTPUT
+                  echo "compare_to=Last deployed SHA" >> $GITHUB_OUTPUT
+                else
+                  echo "No environment variable found. Using fallback tag detection."
+                  # Find the most recent tag as fallback
+                  LAST_TAG=$(git describe --tags --abbrev=0 --exclude=$VERSION_TAG)
+                  echo "Using last tag $LAST_TAG as fallback"
+                  echo "base_sha=$(git rev-list -n 1 $LAST_TAG)" >> $GITHUB_OUTPUT
+                  echo "compare_to=$LAST_TAG" >> $GITHUB_OUTPUT
+                fi
+              fi
+            else
+              # This is a regular release - find previous regular release
+              echo "This is a regular release. Finding previous regular release..."
+              
+              # Get all x.y.0 tags (regular releases), sorted by version
+              MAJOR_TAGS=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.0$')
+              
+              # Find the previous regular release tag
+              FOUND_CURRENT=false
+              PREVIOUS_TAG=""
+              for tag in $MAJOR_TAGS; do
+                if $FOUND_CURRENT; then
+                  PREVIOUS_TAG=$tag
+                  break
+                fi
+                if [ "$tag" = "$VERSION_TAG" ]; then
+                  FOUND_CURRENT=true
+                fi
+              done
+              
+              if [ -n "$PREVIOUS_TAG" ]; then
+                echo "Using previous regular release $PREVIOUS_TAG as base for comparison"
+                echo "base_sha=$(git rev-list -n 1 $PREVIOUS_TAG)" >> $GITHUB_OUTPUT
+                echo "compare_to=$PREVIOUS_TAG" >> $GITHUB_OUTPUT
+              else
+                echo "No previous regular release found, using last deployed SHA"
+                # Try to get environment variable
+                VAR_NAME="LAST_DEPLOYED_SHA_${{ matrix.environment }}"
+                LAST_SHA=$(gh variable get $VAR_NAME --env ${{ matrix.environment }} 2>/dev/null || echo "")
+                
+                if [ -n "$LAST_SHA" ]; then
+                  echo "Using last deployed SHA from environment variable"
+                  echo "base_sha=$LAST_SHA" >> $GITHUB_OUTPUT
+                  echo "compare_to=Last deployed SHA" >> $GITHUB_OUTPUT
+                else
+                  echo "No environment variable found. Using initial commit."
+                  FIRST_COMMIT=$(git rev-list --max-parents=0 HEAD)
+                  echo "Using initial commit as base"
+                  echo "base_sha=$FIRST_COMMIT" >> $GITHUB_OUTPUT
+                  echo "compare_to=Initial commit" >> $GITHUB_OUTPUT
+                fi
+              fi
+            fi
+          else
+            # Not a version tag - use environment variable if available
+            echo "Not a semantic version tag. Checking environment variable."
+            
+            VAR_NAME="LAST_DEPLOYED_SHA_${{ matrix.environment }}"
+            LAST_SHA=$(gh variable get $VAR_NAME --env ${{ matrix.environment }} 2>/dev/null || echo "")
+            
+            if [ -n "$LAST_SHA" ]; then
+              echo "Using last deployed SHA from environment variable"
+              echo "base_sha=$LAST_SHA" >> $GITHUB_OUTPUT
+              echo "compare_to=Last deployed SHA" >> $GITHUB_OUTPUT
+            else
+              echo "No environment variable found. Using last tag."
+              LAST_TAG=$(git describe --tags --abbrev=0 --exclude=$VERSION_TAG)
+              echo "Using last tag $LAST_TAG as fallback"
+              echo "base_sha=$(git rev-list -n 1 $LAST_TAG)" >> $GITHUB_OUTPUT
+              echo "compare_to=$LAST_TAG" >> $GITHUB_OUTPUT
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create JWT Key file
+        run: |
+          echo "SIMULATED: Would create JWT key file"
+          # echo "${{ secrets.SF_JWT_KEY }}" > gha-server.key
+
+      - name: Authorize Org - ${{ matrix.environment }}
+        env:
+          CLIENT_ID: ${{ vars.SF_CLIENTID }}
+          USERNAME: ${{ vars.SF_USERNAME }}
+          INSTANCE_ALIAS: ${{ vars.SF_INSTANCEURL }}
+        run: |
+          echo "SIMULATED: Would authorize ${{ matrix.environment }} org"
+          # sf org login jwt --client-id $CLIENT_ID --jwt-key-file gha-server.key --username $USERNAME --alias $INSTANCE_ALIAS
+
+      - name: Calculate and deploy delta
+        id: deploy
+        env:
+          USERNAME: ${{ vars.SF_USERNAME }}
+        run: |
+          echo "Calculating delta from ${{ steps.determine_base.outputs.compare_to }} to ${{ inputs.version_tag }}"
+          
+          # COMMENTED OUT FOR TESTING: Calculate delta
+          # sf sgd:source:delta --to "HEAD" --from "${{ steps.determine_base.outputs.base_sha }}" -o "." -i .forceignore
+          
+          # FOR TESTING: Create mock package file to simulate a deploy
+          mkdir -p package
+          echo '<?xml version="1.0" encoding="UTF-8"?><Package xmlns="http://soap.sforce.com/2006/04/metadata"><version>58.0</version></Package>' > package/package.xml
+          
+          echo "SIMULATED DEPLOYMENT: Would deploy to ${{ matrix.environment }}"
+          echo "Base SHA: ${{ steps.determine_base.outputs.base_sha }}"
+          echo "Compare to: ${{ steps.determine_base.outputs.compare_to }}"
+          
+          # Simulate a successful deployment
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          node-version: '18'
-          cache: 'npm'
+          name: delta-package-${{ matrix.environment }}
+          path: |
+            package/package.xml
+            destructiveChanges/destructiveChanges.xml
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run pre-deployment checks
+      - name: Update last deployed SHA
+        if: success() && (matrix.environment != 'production' || (matrix.environment == 'production' && steps.deploy.outcome == 'success'))
         run: |
-          echo "Running pre-deployment checks for staging"
-          npm run validate:staging
-
-      - name: Deploy to staging
-        run: |
-          echo "Deploying ${{ inputs.version }} to staging"
-          npm run deploy:staging
-
-      - name: Run smoke tests
-        run: |
-          echo "Running smoke tests in staging"
-          npm run test:smoke:staging
-
-      - name: Monitor deployment
-        run: |
-          echo "Monitoring staging deployment"
-          npm run monitor:staging
+          # Store the current SHA as the last deployed SHA for this environment
+          CURRENT_SHA=$(git rev-parse HEAD)
+          VAR_NAME="LAST_DEPLOYED_SHA_${{ matrix.environment }}"
+          
+          # Update the environment variable with the new SHA
+          gh variable set $VAR_NAME --env ${{ matrix.environment }} --body "$CURRENT_SHA"
+          echo "Updated $VAR_NAME to $CURRENT_SHA for environment ${{ matrix.environment }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify deployment status
         if: always()
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          payload: |
-            {
-              "text": "${{ inputs.version }} staging deployment ${{ job.status }}",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*Staging Deployment Status Update*\n${{ inputs.version }} ${{ job.status }}"
-                  }
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          echo "SIMULATED: Would send Slack notification for ${{ inputs.version_tag }} deployment to ${{ matrix.environment }}"
+          echo "Status: ${{ job.status }}"
+          echo "Compared against: ${{ steps.determine_base.outputs.compare_to }}"
+          
+          # COMMENTED OUT FOR TESTING
+          # uses: slackapi/slack-github-action@v1.24.0
+          # with:
+          #   payload: |
+          #     {
+          #       "text": "${{ inputs.version_tag }} ${{ matrix.environment }} deployment ${{ job.status }}",
+          #       "blocks": [
+          #         {
+          #           "type": "section",
+          #           "text": {
+          #             "type": "mrkdwn",
+          #             "text": "*Salesforce Deployment Status Update*\n${{ inputs.version_tag }} to ${{ matrix.environment }}: ${{ job.status }}\nCompared against: ${{ steps.determine_base.outputs.compare_to }}"
+          #           }
+          #         }
+          #       ]
+          #     }
+          # env:
+          #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
-  deploy-production:
-    if: inputs.deploy_production
+  run-e2e-tests:
+    needs: deploy
+    if: success() && contains(fromJson(needs.determine-environments.outputs.matrix), 'staging2')
     runs-on: ubuntu-latest
-    environment: production
+    environment: e2e-staging2
+    name: Run E2E Tests
     
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.version }}
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run pre-deployment checks
+          ref: ${{ inputs.version_tag }}
+      
+      - name: Run E2E tests
         run: |
-          echo "Running pre-deployment checks for production"
-          npm run validate:production
+          echo "SIMULATED: Would run E2E tests against staging2"
+          # npm run test:e2e:staging
 
-      - name: Deploy to production
-        run: |
-          echo "Deploying ${{ inputs.version }} to production"
-          npm run deploy:production
-
-      - name: Run smoke tests
-        run: |
-          echo "Running smoke tests in production"
-          npm run test:smoke:production
-
-      - name: Monitor deployment
-        run: |
-          echo "Monitoring production deployment"
-          npm run monitor:production
-
-      - name: Notify deployment status
+      - name: Notify test results
         if: always()
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          payload: |
-            {
-              "text": "${{ inputs.version }} production deployment ${{ job.status }}",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*Production Deployment Status Update*\n${{ inputs.version }} ${{ job.status }}"
-                  }
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-
-  notify-completion:
-    needs: [deploy-staging, deploy-production]
-    if: always() && (needs.deploy-staging.result != 'skipped' || needs.deploy-production.result != 'skipped')
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Notify overall status
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          payload: |
-            {
-              "text": "Deployment Status Summary for ${{ inputs.version }}",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*Deployment Status Summary for ${{ inputs.version }}*\n${{ needs.deploy-staging.result != 'skipped' && format('Staging: {0}', needs.deploy-staging.result) || 'Staging: Not deployed' }}\n${{ needs.deploy-production.result != 'skipped' && format('Production: {0}', needs.deploy-production.result) || 'Production: Not deployed' }}"
-                  }
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} 
+        run: |
+          echo "SIMULATED: Would send Slack notification for E2E test results"
+          echo "Version: ${{ inputs.version_tag }}"
+          echo "Status: ${{ job.status }}"
+          
+          # COMMENTED OUT FOR TESTING
+          # uses: slackapi/slack-github-action@v1.24.0
+          # with:
+          #   payload: |
+          #     {
+          #       "text": "${{ inputs.version_tag }} E2E tests ${{ job.status }}",
+          #       "blocks": [
+          #         {
+          #           "type": "section",
+          #           "text": {
+          #             "type": "mrkdwn", 
+          #             "text": "*E2E Test Results*\n${{ inputs.version_tag }}: ${{ job.status }}"
+          #           }
+          #         }
+          #       ]
+          #     }
+          # env:
+          #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

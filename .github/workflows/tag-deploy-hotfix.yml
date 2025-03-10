@@ -1,0 +1,167 @@
+# tag-deploy-hotfix.yml
+name: Tag and Deploy Hotfix
+run-name: Tag and deploy hotfix v${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Hotfix version number (e.g., 1.0.1)'
+        required: true
+        type: string
+      hotfix_branch:
+        description: 'Hotfix branch (e.g., hotfix/v1.0.1)'
+        required: true
+        type: string
+      deploy_staging2:
+        description: 'Deploy to staging2'
+        type: boolean
+        default: true
+        required: false
+      deploy_production:
+        description: 'Deploy to production'
+        type: boolean
+        default: true
+        required: false
+      destructive_changes:
+        description: 'Run destructive changes'
+        type: boolean
+        default: false
+        required: false
+      merge_to_main:
+        description: 'Merge hotfix to main after successful deployment'
+        type: boolean
+        default: true
+        required: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version format
+        run: |
+          if ! [[ ${{ inputs.version }} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format. Must be in format X.Y.Z"
+            exit 1
+          fi
+  
+  tag-hotfix:
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      version_tag: v${{ inputs.version }}
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.hotfix_branch }}
+          fetch-depth: 0
+      
+      - name: Create and push tag
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "GitHub Actions"
+          git tag -a v${{ inputs.version }} -m "Hotfix v${{ inputs.version }}"
+          git push origin v${{ inputs.version }}
+          echo "Created and pushed tag v${{ inputs.version }}"
+      
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          # Extract base version from hotfix version
+          if [[ ${{ inputs.version }} =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            
+            # Construct base version tag
+            BASE_VERSION="v${MAJOR}.${MINOR}.0"
+            
+            # Generate changelog
+            echo "CHANGELOG<<EOF" >> $GITHUB_ENV
+            echo "## Hotfix Changes" >> $GITHUB_ENV
+            echo "" >> $GITHUB_ENV
+            echo "This is a hotfix based on $BASE_VERSION" >> $GITHUB_ENV
+            echo "" >> $GITHUB_ENV
+            git log --pretty=format:"* %s (%h)" $BASE_VERSION..HEAD >> $GITHUB_ENV
+            echo "" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          else
+            echo "Failed to extract base version"
+            exit 1
+          fi
+      
+      - name: Create GitHub Release
+        run: |
+          echo "SIMULATED: Would create GitHub release for hotfix v${{ inputs.version }}"
+          echo "Release notes:"
+          echo "${{ env.CHANGELOG }}"
+          
+          # COMMENTED OUT FOR TESTING
+          # uses: softprops/action-gh-release@v1
+          # with:
+          #   tag_name: v${{ inputs.version }}
+          #   name: Hotfix v${{ inputs.version }}
+          #   body: ${{ env.CHANGELOG }}
+          #   draft: false
+          #   prerelease: true
+
+  deploy:
+    needs: tag-hotfix
+    if: success() && (inputs.deploy_staging2 || inputs.deploy_production)
+    uses: ./.github/workflows/deploy-salesforce.yml
+    with:
+      version_tag: v${{ inputs.version }}
+      deploy_staging2: ${{ inputs.deploy_staging2 }}
+      deploy_production: ${{ inputs.deploy_production }}
+      destructive_changes: ${{ inputs.destructive_changes }}
+    secrets: inherit
+
+  merge-to-main:
+    needs: [tag-hotfix, deploy]
+    if: success() && inputs.merge_to_main
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Merge hotfix to main
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "GitHub Actions"
+          
+          # Check out main and update
+          git checkout main
+          git pull
+          
+          # Merge hotfix branch with no-ff to preserve history
+          git merge --no-ff ${{ inputs.hotfix_branch }} -m "Merge hotfix v${{ inputs.version }} to main"
+          
+          # Push changes
+          git push origin main
+          
+      - name: Notify merge completed
+        run: |
+          echo "SIMULATED: Would send Slack notification about hotfix merge to main"
+          echo "Hotfix: v${{ inputs.version }}"
+          
+          # COMMENTED OUT FOR TESTING
+          # uses: slackapi/slack-github-action@v1.24.0
+          # with:
+          #   payload: |
+          #     {
+          #       "text": "Hotfix merged to main",
+          #       "blocks": [
+          #         {
+          #           "type": "section", 
+          #           "text": {
+          #             "type": "mrkdwn",
+          #             "text": "*Hotfix v${{ inputs.version }} merged to main*\nThe hotfix has been successfully deployed and merged back to the main branch."
+          #           }
+          #         }
+          #       ]
+          #     }
+          # env:
+          #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

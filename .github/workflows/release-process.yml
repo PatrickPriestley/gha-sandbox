@@ -1,4 +1,6 @@
+# release.yml
 name: Release Process
+run-name: Create and deploy ${{ inputs.is_hotfix && 'hotfix' || 'release' }} v${{ inputs.version }}
 
 on:
   workflow_dispatch:
@@ -17,64 +19,97 @@ on:
         required: false
         default: false
         type: boolean
-      deploy_staging:
-        description: 'Deploy to staging'
+      base_version:
+        description: 'Base version for hotfix (e.g., v1.0.0, required for hotfixes)'
+        required: false
+        type: string
+      deploy_staging2:
+        description: 'Deploy to staging2'
         type: boolean
         default: true
         required: false
       deploy_production:
         description: 'Deploy to production'
         type: boolean
-        default: true
+        default: false
+        required: false
+      destructive_changes:
+        description: 'Run destructive changes'
+        type: boolean
+        default: false
         required: false
 
 jobs:
+  validate-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version format
+        run: |
+          if ! [[ ${{ inputs.version }} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format. Must be in format X.Y.Z"
+            exit 1
+          fi
+      
+      - name: Validate hotfix inputs
+        if: inputs.is_hotfix
+        run: |
+          if [ -z "${{ inputs.base_version }}" ]; then
+            echo "::error::Base version is required for hotfixes"
+            exit 1
+          fi
+          
+          if ! [[ ${{ inputs.base_version }} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid base version format. Must be in format vX.Y.Z"
+            exit 1
+          fi
+
   prepare-release:
+    needs: validate-inputs
     runs-on: ubuntu-latest
     outputs:
-      version_tag: v${{ github.event.inputs.version }}
+      version_tag: v${{ inputs.version }}
+      branch_name: ${{ steps.set_branch.outputs.branch_name }}
     
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch }}
+          ref: ${{ inputs.is_hotfix && inputs.base_version || inputs.branch }}
           fetch-depth: 0
-
-      - name: Validate version format
+      
+      - name: Set branch name
+        id: set_branch
         run: |
-          if ! [[ ${{ github.event.inputs.version }} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid version format. Must be in format X.Y.Z"
-            exit 1
+          if [ "${{ inputs.is_hotfix }}" = "true" ]; then
+            BRANCH_NAME="hotfix/v${{ inputs.version }}"
+            echo "Creating hotfix branch $BRANCH_NAME from ${{ inputs.base_version }}"
+          else
+            BRANCH_NAME="${{ inputs.branch }}"
+            echo "Using existing branch $BRANCH_NAME"
           fi
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run tests
-        run: npm test
-
-      - name: Update version in package.json
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+      
+      - name: Create hotfix branch if needed
+        if: inputs.is_hotfix
         run: |
-          npm version ${{ github.event.inputs.version }} --no-git-tag-version
+          git checkout ${{ inputs.base_version }}
+          git checkout -b ${{ steps.set_branch.outputs.branch_name }}
+          git push -u origin ${{ steps.set_branch.outputs.branch_name }}
+          echo "Created and pushed hotfix branch ${{ steps.set_branch.outputs.branch_name }}"
+          echo "Developers should now make changes on this branch and create a PR"
+          echo "After PR approval, continue the release process by tagging this branch"
+      
+      - name: Create tag directly (for non-hotfixes)
+        if: ${{ !inputs.is_hotfix }}
+        run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
-          git add package.json package-lock.json
-          git commit -m "chore: bump version to ${{ github.event.inputs.version }}"
-          git push origin HEAD:${{ github.event.inputs.branch }}
-
-      - name: Create and push tag
-        run: |
-          git tag -a v${{ github.event.inputs.version }} -m "Release v${{ github.event.inputs.version }}"
-          git push origin v${{ github.event.inputs.version }}
+          git config --global user.name "GitHub Actions"
+          git tag -a v${{ inputs.version }} -m "Release v${{ inputs.version }}"
+          git push origin v${{ inputs.version }}
+          echo "Created and pushed tag v${{ inputs.version }}"
 
   create-release:
     needs: prepare-release
+    if: ${{ !inputs.is_hotfix }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -83,7 +118,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
+          
       - name: Generate release notes
         id: release_notes
         run: |
@@ -101,21 +136,68 @@ jobs:
           git log --pretty=format:"* %s (%h)" $PREV_TAG..HEAD >> $GITHUB_ENV
           echo "" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
-
+          
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.prepare-release.outputs.version_tag }}
-          name: Release ${{ needs.prepare-release.outputs.version_tag }}
-          body: ${{ env.CHANGELOG }}
-          draft: false
-          prerelease: ${{ github.event.inputs.is_hotfix }}
+        run: |
+          echo "SIMULATED: Would create GitHub release for v${{ inputs.version }}"
+          echo "Release notes:"
+          echo "${{ env.CHANGELOG }}"
+          
+          # COMMENTED OUT FOR TESTING
+          # uses: softprops/action-gh-release@v1
+          # with:
+          #   tag_name: v${{ inputs.version }}
+          #   name: Release v${{ inputs.version }}
+          #   body: ${{ env.CHANGELOG }}
+          #   draft: false
+          #   prerelease: false
 
-  trigger-deployment:
+  deploy:
     needs: [prepare-release, create-release]
-    uses: ./.github/workflows/deploy.yml
+    if: ${{ !inputs.is_hotfix && (inputs.deploy_staging2 || inputs.deploy_production) }}
+    uses: ./.github/workflows/deploy-salesforce.yml
     with:
-      version: ${{ needs.prepare-release.outputs.version_tag }}
-      deploy_staging: ${{ github.event.inputs.deploy_staging }}
-      deploy_production: ${{ github.event.inputs.deploy_production }}
-    secrets: inherit 
+      version_tag: v${{ inputs.version }}
+      deploy_staging2: ${{ inputs.deploy_staging2 }}
+      deploy_production: ${{ inputs.deploy_production }}
+      destructive_changes: ${{ inputs.destructive_changes }}
+    secrets: inherit
+
+  notify-hotfix-created:
+    needs: prepare-release
+    if: inputs.is_hotfix
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Send notification
+        run: |
+          echo "SIMULATED: Would send Slack notification about hotfix branch creation"
+          echo "Branch: ${{ needs.prepare-release.outputs.branch_name }}"
+          echo "Base version: ${{ inputs.base_version }}"
+          echo "Target version: v${{ inputs.version }}"
+          
+          # COMMENTED OUT FOR TESTING
+          # uses: slackapi/slack-github-action@v1.24.0
+          # with:
+          #   payload: |
+          #     {
+          #       "text": "Hotfix branch created",
+          #       "blocks": [
+          #         {
+          #           "type": "section",
+          #           "text": {
+          #             "type": "mrkdwn",
+          #             "text": "*Hotfix branch created*\nBranch: `${{ needs.prepare-release.outputs.branch_name }}`\nBase version: `${{ inputs.base_version }}`\nTarget version: `v${{ inputs.version }}`"
+          #           }
+          #         },
+          #         {
+          #           "type": "section",
+          #           "text": {
+          #             "type": "mrkdwn",
+          #             "text": "1. Make your changes in this branch\n2. Create a PR for review\n3. After approval, tag the branch with `v${{ inputs.version }}`\n4. Deploy using the 'Tag and Deploy Hotfix' workflow"
+          #           }
+          #         }
+          #       ]
+          #     }
+          # env:
+          #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
