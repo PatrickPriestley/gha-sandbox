@@ -1,18 +1,22 @@
 # release.yml
 name: Release Process
-run-name: Create and deploy ${{ inputs.is_hotfix && 'hotfix' || 'release' }} v${{ inputs.version }}
+run-name: Create ${{ inputs.is_hotfix && 'hotfix' || 'release' }} ${{ inputs.version || format('{0}', inputs.release_type) }}
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version number (e.g., 1.0.0)'
+      release_type:
+        description: 'Release type for automatic versioning'
+        type: choice
         required: true
-        type: string
-      branch:
-        description: 'Branch to release from (defaults to main)'
+        default: 'patch'
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: 'Manual version number (leave empty for auto)'
         required: false
-        default: 'main'
         type: string
       is_hotfix:
         description: 'Is this a hotfix release?'
@@ -20,30 +24,26 @@ on:
         default: false
         type: boolean
       base_version:
-        description: 'Base version for hotfix (e.g., v1.0.0, required for hotfixes)'
+        description: 'Base version for hotfix (e.g., v1.0.0)'
         required: false
         type: string
-      deploy_staging2:
-        description: 'Deploy to staging2'
-        type: boolean
-        default: true
-        required: false
-      deploy_production:
-        description: 'Deploy to production'
-        type: boolean
-        default: false
-        required: false
-      destructive_changes:
-        description: 'Run destructive changes'
-        type: boolean
-        default: false
-        required: false
+      environments:
+        description: 'Target environments'
+        type: choice
+        options:
+          - staging2
+          - production
+          - both
+          - none
+        default: 'staging2'
+        required: true
 
 jobs:
   validate-inputs:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate version format
+      - name: Validate manual version format
+        if: inputs.version != ''
         run: |
           if ! [[ ${{ inputs.version }} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Invalid version format. Must be in format X.Y.Z"
@@ -63,41 +63,69 @@ jobs:
             exit 1
           fi
 
-  prepare-release:
+  determine-version:
     needs: validate-inputs
+    runs-on: ubuntu-latest
+    outputs:
+      version_tag: ${{ (inputs.version != '' && format('v{0}', inputs.version)) || steps.tag_version.outputs.new_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      
+      - name: Bump version and create tag
+        id: tag_version
+        if: inputs.version == ''
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: ${{ inputs.release_type }}
+          dry_run: true
+          
+      - name: Display determined version
+        run: |
+          if [ -z "${{ inputs.version }}" ]; then
+            echo "Automatically determined version: ${{ steps.tag_version.outputs.new_tag }}"
+          else
+            echo "Using manually specified version: v${{ inputs.version }}"
+          fi
+
+  prepare-release:
+    needs: determine-version
     runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
-      version_tag: v${{ inputs.version }}
+      version_tag: ${{ needs.determine-version.outputs.version_tag }}
       branch_name: ${{ steps.set_branch.outputs.branch_name }}
     
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.is_hotfix && inputs.base_version || inputs.branch }}
+          ref: ${{ inputs.is_hotfix && inputs.base_version || 'main' }}
           fetch-depth: 0
       
       - name: Set branch name
         id: set_branch
         run: |
           if [ "${{ inputs.is_hotfix }}" = "true" ]; then
-            BRANCH_NAME="hotfix/v${{ inputs.version }}"
+            BRANCH_NAME="hotfix/${{ needs.determine-version.outputs.version_tag }}"
             echo "Creating hotfix branch $BRANCH_NAME from ${{ inputs.base_version }}"
           else
-            BRANCH_NAME="${{ inputs.branch }}"
-            echo "Using existing branch $BRANCH_NAME"
+            BRANCH_NAME="main"
+            echo "Using main branch"
           fi
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
       
       - name: Create hotfix branch if needed
         if: inputs.is_hotfix
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "GitHub Actions"
-          git remote set-url origin "https://${GITHUB_ACTOR}:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
           git checkout ${{ inputs.base_version }}
           git checkout -b ${{ steps.set_branch.outputs.branch_name }}
           git push -u origin ${{ steps.set_branch.outputs.branch_name }}
@@ -109,9 +137,9 @@ jobs:
         if: ${{ !inputs.is_hotfix }}
         uses: ncipollo/release-action@v1
         with:
-          tag: v${{ inputs.version }}
-          name: Release v${{ inputs.version }}
-          commit: ${{ inputs.branch }}
+          tag: ${{ needs.determine-version.outputs.version_tag }}
+          name: Release ${{ needs.determine-version.outputs.version_tag }}
+          commit: main
           generateReleaseNotes: true
           makeLatest: "legacy"
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -120,7 +148,7 @@ jobs:
           prerelease: "false"
 
   notify-hotfix-created:
-    needs: prepare-release
+    needs: [determine-version, prepare-release]
     if: inputs.is_hotfix
     runs-on: ubuntu-latest
     
@@ -130,72 +158,38 @@ jobs:
           echo "SIMULATED: Would send Slack notification about hotfix branch creation"
           echo "Branch: ${{ needs.prepare-release.outputs.branch_name }}"
           echo "Base version: ${{ inputs.base_version }}"
-          echo "Target version: v${{ inputs.version }}"
-          
-          # COMMENTED OUT FOR TESTING
-          # uses: slackapi/slack-github-action@v1.24.0
-          # with:
-          #   payload: |
-          #     {
-          #       "text": "Hotfix branch created",
-          #       "blocks": [
-          #         {
-          #           "type": "section",
-          #           "text": {
-          #             "type": "mrkdwn",
-          #             "text": "*Hotfix branch created*\nBranch: `${{ needs.prepare-release.outputs.branch_name }}`\nBase version: `${{ inputs.base_version }}`\nTarget version: `v${{ inputs.version }}`"
-          #           }
-          #         },
-          #         {
-          #           "type": "section",
-          #           "text": {
-          #             "type": "mrkdwn",
-          #             "text": "1. Make your changes in this branch\n2. Create a PR for review\n3. After approval, tag the branch with `v${{ inputs.version }}`\n4. Deploy using the 'Tag and Deploy Hotfix' workflow"
-          #           }
-          #         }
-          #       ]
-          #     }
-          # env:
-          #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          echo "Target version: ${{ needs.determine-version.outputs.version_tag }}"
 
   deploy-staging2:
-    needs: prepare-release
-    if: ${{ !inputs.is_hotfix && inputs.deploy_staging2 }}
+    needs: [determine-version, prepare-release]
+    if: ${{ !inputs.is_hotfix && (inputs.environments == 'staging2' || inputs.environments == 'both') }}
     runs-on: ubuntu-latest
     environment: staging2
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: v${{ inputs.version }}
+          ref: ${{ needs.determine-version.outputs.version_tag }}
           fetch-depth: 0
       
       - name: Deploy to staging2
         run: |
-          echo "SIMULATED: Would deploy v${{ inputs.version }} to staging2"
-          echo "Version Tag: v${{ inputs.version }}"
-          echo "Destructive Changes: ${{ inputs.destructive_changes }}"
+          echo "SIMULATED: Would deploy ${{ needs.determine-version.outputs.version_tag }} to staging2"
           # Real deployment steps would go here
-          
-      - name: Run tests
-        run: |
-          echo "SIMULATED: Would run tests in staging2"
 
   deploy-production:
-    needs: [prepare-release, deploy-staging2]
-    if: ${{ !inputs.is_hotfix && inputs.deploy_production }}
+    needs: [determine-version, prepare-release, deploy-staging2]
+    if: ${{ !inputs.is_hotfix && (inputs.environments == 'production' || inputs.environments == 'both') }}
     runs-on: ubuntu-latest
     environment: production
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: v${{ inputs.version }}
+          ref: ${{ needs.determine-version.outputs.version_tag }}
           fetch-depth: 0
       
       - name: Deploy to production
         run: |
-          echo "SIMULATED: Would deploy v${{ inputs.version }} to production"
-          echo "Version Tag: v${{ inputs.version }}"
-          echo "Destructive Changes: ${{ inputs.destructive_changes }}"
+          echo "SIMULATED: Would deploy ${{ needs.determine-version.outputs.version_tag }} to production"
           # Real deployment steps would go here

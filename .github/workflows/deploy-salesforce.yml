@@ -1,6 +1,6 @@
 # deploy-salesforce.yml
 name: Deploy Salesforce
-run-name: Deploy ${{ inputs.version_tag }} to selected environments
+run-name: Deploy ${{ inputs.version_tag }} to ${{ inputs.environments }}
 
 on:
   workflow_call:
@@ -9,20 +9,15 @@ on:
         description: "Tag version to deploy (e.g., v1.0.0)"
         type: string
         required: true
-      deploy_staging2:
-        description: "Deploy to staging2"
-        type: boolean
-        default: true
-        required: false
-      deploy_production:
-        description: "Deploy to production"
-        type: boolean
-        default: false
-        required: false
+      environments:
+        description: "Target environments"
+        type: string
+        default: 'staging2'
+        required: true
       destructive_changes:
         description: "Run destructive changes"
-        type: boolean
-        default: false
+        type: string
+        default: 'false'
         required: false
   
   workflow_dispatch:
@@ -31,16 +26,15 @@ on:
         description: "Tag version to deploy (e.g., v1.0.0)"
         type: string
         required: true
-      deploy_staging2:
-        description: "Deploy to staging2"
-        type: boolean
-        default: true
-        required: false
-      deploy_production:
-        description: "Deploy to production"
-        type: boolean
-        default: false
-        required: false
+      environments:
+        description: "Target environments"
+        type: choice
+        options:
+          - staging2
+          - production
+          - both
+        default: 'staging2'
+        required: true
       destructive_changes:
         description: "Run destructive changes"
         type: boolean
@@ -56,10 +50,13 @@ jobs:
       - id: set-matrix
         run: |
           ENVIRONMENTS=()
-          if [[ "${{ inputs.deploy_staging2 }}" == "true" ]]; then
+          
+          # Handle both direct Boolean and string 'true'/'false' inputs
+          if [[ "${{ inputs.environments }}" == "staging2" || "${{ inputs.environments }}" == "both" ]]; then
             ENVIRONMENTS+=("staging2")
           fi
-          if [[ "${{ inputs.deploy_production }}" == "true" ]]; then
+          
+          if [[ "${{ inputs.environments }}" == "production" || "${{ inputs.environments }}" == "both" ]]; then
             ENVIRONMENTS+=("production")
           fi
           
@@ -244,6 +241,14 @@ jobs:
           echo "Base SHA: ${{ steps.determine_base.outputs.base_sha }}"
           echo "Compare to: ${{ steps.determine_base.outputs.compare_to }}"
           
+          # Handle destructive changes parameter conversion
+          DESTRUCTIVE_CHANGES="false"
+          if [[ "${{ inputs.destructive_changes }}" == "true" || "${{ inputs.destructive_changes }}" == true ]]; then
+            DESTRUCTIVE_CHANGES="true"
+          fi
+          
+          echo "Destructive changes: $DESTRUCTIVE_CHANGES"
+          
           # Simulate a successful deployment
           exit 0
 
@@ -274,25 +279,6 @@ jobs:
           echo "SIMULATED: Would send Slack notification for ${{ inputs.version_tag }} deployment to ${{ matrix.environment }}"
           echo "Status: ${{ job.status }}"
           echo "Compared against: ${{ steps.determine_base.outputs.compare_to }}"
-          
-          # COMMENTED OUT FOR TESTING
-          # uses: slackapi/slack-github-action@v1.24.0
-          # with:
-          #   payload: |
-          #     {
-          #       "text": "${{ inputs.version_tag }} ${{ matrix.environment }} deployment ${{ job.status }}",
-          #       "blocks": [
-          #         {
-          #           "type": "section",
-          #           "text": {
-          #             "type": "mrkdwn",
-          #             "text": "*Salesforce Deployment Status Update*\n${{ inputs.version_tag }} to ${{ matrix.environment }}: ${{ job.status }}\nCompared against: ${{ steps.determine_base.outputs.compare_to }}"
-          #           }
-          #         }
-          #       ]
-          #     }
-          # env:
-          #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
   run-e2e-tests:
     needs: deploy
@@ -310,7 +296,6 @@ jobs:
       - name: Run E2E tests
         run: |
           echo "SIMULATED: Would run E2E tests against staging2"
-          # npm run test:e2e:staging
 
       - name: Notify test results
         if: always()
@@ -318,22 +303,3 @@ jobs:
           echo "SIMULATED: Would send Slack notification for E2E test results"
           echo "Version: ${{ inputs.version_tag }}"
           echo "Status: ${{ job.status }}"
-          
-          # COMMENTED OUT FOR TESTING
-          # uses: slackapi/slack-github-action@v1.24.0
-          # with:
-          #   payload: |
-          #     {
-          #       "text": "${{ inputs.version_tag }} E2E tests ${{ job.status }}",
-          #       "blocks": [
-          #         {
-          #           "type": "section",
-          #           "text": {
-          #             "type": "mrkdwn", 
-          #             "text": "*E2E Test Results*\n${{ inputs.version_tag }}: ${{ job.status }}"
-          #           }
-          #         }
-          #       ]
-          #     }
-          # env:
-          #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

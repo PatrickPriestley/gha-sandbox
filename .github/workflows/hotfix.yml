@@ -1,4 +1,6 @@
-name: Hotfix Process
+# hotfix.yml
+name: Create Hotfix Branch
+run-name: Create hotfix branch from ${{ inputs.base_version }}
 
 on:
   workflow_dispatch:
@@ -7,84 +9,147 @@ on:
         description: 'Base version to create hotfix from (e.g., v1.0.0)'
         required: true
         type: string
-      hotfix_version:
-        description: 'New hotfix version (e.g., 1.0.1)'
-        required: true
+      version:
+        description: 'New hotfix version (leave empty for auto)'
+        required: false
         type: string
 
 jobs:
-  create-hotfix:
+  determine-version:
     runs-on: ubuntu-latest
     outputs:
-      branch_name: ${{ steps.create_branch.outputs.branch_name }}
+      version_tag: ${{ (inputs.version != '' && format('v{0}', inputs.version)) || steps.auto_version.outputs.version_tag }}
+      branch_name: ${{ steps.set_branch.outputs.branch_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Validate base version
+        run: |
+          if ! [[ "${{ inputs.base_version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid base version format. Must be in format vX.Y.Z"
+            exit 1
+          fi
+      
+      - name: Auto-determine version
+        id: auto_version
+        if: inputs.version == ''
+        run: |
+          # Extract base version components
+          if [[ "${{ inputs.base_version }}" =~ v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            
+            # Increment patch version
+            NEW_PATCH=$((PATCH + 1))
+            NEW_VERSION="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+            echo "version_tag=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "Automatically determined version: $NEW_VERSION"
+          else
+            echo "::error::Failed to parse base version. Please specify version explicitly."
+            exit 1
+          fi
+          
+      - name: Validate manual version
+        id: manual_version
+        if: inputs.version != ''
+        run: |
+          if ! [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format. Must be in format X.Y.Z"
+            exit 1
+          fi
+          echo "Using manual version: v${{ inputs.version }}"
+      
+      - name: Set branch name
+        id: set_branch
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            BRANCH_NAME="hotfix/v${{ inputs.version }}"
+          else
+            BRANCH_NAME="hotfix/${{ steps.auto_version.outputs.version_tag }}"
+          fi
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "Will create branch: $BRANCH_NAME"
+  
+  create-hotfix:
+    needs: determine-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Validate versions
-        run: |
-          if ! [[ ${{ github.event.inputs.base_version }} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid base version format. Must be in format vX.Y.Z"
-            exit 1
-          fi
-          if ! [[ ${{ github.event.inputs.hotfix_version }} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid hotfix version format. Must be in format X.Y.Z"
-            exit 1
-          fi
-
+      
       - name: Create hotfix branch
-        id: create_branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BRANCH_NAME="hotfix/v${{ github.event.inputs.hotfix_version }}"
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          git checkout ${{ github.event.inputs.base_version }}
-          git checkout -b $BRANCH_NAME
-          git push -u origin $BRANCH_NAME
-
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "GitHub Actions"
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
+          
+          git checkout ${{ inputs.base_version }}
+          git checkout -b ${{ needs.determine-version.outputs.branch_name }}
+          git push -u origin ${{ needs.determine-version.outputs.branch_name }}
+          
+          echo "Created and pushed hotfix branch ${{ needs.determine-version.outputs.branch_name }}"
+          echo "Developers should now make changes on this branch and create a PR"
+      
       - name: Create PR template
         run: |
-          echo "## Hotfix PR for v${{ github.event.inputs.hotfix_version }}" > .github/PULL_REQUEST_TEMPLATE.md
+          mkdir -p .github
+          echo "## Hotfix PR for ${{ needs.determine-version.outputs.version_tag }}" > .github/PULL_REQUEST_TEMPLATE.md
           echo "" >> .github/PULL_REQUEST_TEMPLATE.md
-          echo "This is a hotfix branch created from ${{ github.event.inputs.base_version }}" >> .github/PULL_REQUEST_TEMPLATE.md
+          echo "This is a hotfix branch created from ${{ inputs.base_version }}" >> .github/PULL_REQUEST_TEMPLATE.md
           echo "" >> .github/PULL_REQUEST_TEMPLATE.md
           echo "### Changes" >> .github/PULL_REQUEST_TEMPLATE.md
           echo "- [ ] List your changes here" >> .github/PULL_REQUEST_TEMPLATE.md
           echo "" >> .github/PULL_REQUEST_TEMPLATE.md
           echo "### Testing" >> .github/PULL_REQUEST_TEMPLATE.md
           echo "- [ ] Describe how these changes were tested" >> .github/PULL_REQUEST_TEMPLATE.md
+          
           git add .github/PULL_REQUEST_TEMPLATE.md
           git commit -m "chore: add PR template for hotfix"
-          git push origin ${{ steps.create_branch.outputs.branch_name }}
+          git push origin ${{ needs.determine-version.outputs.branch_name }}
 
   notify-team:
-    needs: create-hotfix
+    needs: [determine-version, create-hotfix]
     runs-on: ubuntu-latest
     
     steps:
-      - name: Send Slack notification
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          payload: |
-            {
-              "text": "Hotfix branch created",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*Hotfix branch created*\nBranch: `${{ needs.create-hotfix.outputs.branch_name }}`\nBase version: `${{ github.event.inputs.base_version }}`\nTarget version: `v${{ github.event.inputs.hotfix_version }}`"
-                  }
-                },
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "Please make your changes in this branch and create a PR when ready."
-                  }
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} 
+      - name: Send notification
+        run: |
+          echo "SIMULATED: Would send Slack notification about hotfix branch creation"
+          echo "Branch: ${{ needs.determine-version.outputs.branch_name }}"
+          echo "Base version: ${{ inputs.base_version }}"
+          echo "Target version: ${{ needs.determine-version.outputs.version_tag }}"
+          
+          # COMMENTED OUT FOR TESTING
+          # uses: slackapi/slack-github-action@v1.24.0
+          # with:
+          #   payload: |
+          #     {
+          #       "text": "Hotfix branch created",
+          #       "blocks": [
+          #         {
+          #           "type": "section",
+          #           "text": {
+          #             "type": "mrkdwn",
+          #             "text": "*Hotfix branch created*\nBranch: `${{ needs.determine-version.outputs.branch_name }}`\nBase version: `${{ inputs.base_version }}`\nTarget version: `${{ needs.determine-version.outputs.version_tag }}`"
+          #           }
+          #         },
+          #         {
+          #           "type": "section",
+          #           "text": {
+          #             "type": "mrkdwn",
+          #             "text": "Please make your changes in this branch and create a PR when ready. Once approved, use the 'Tag and Deploy Hotfix' workflow to deploy."
+          #           }
+          #         }
+          #       ]
+          #     }
+          # env:
+          #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

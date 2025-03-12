@@ -1,33 +1,27 @@
 # tag-deploy-hotfix.yml
 name: Tag and Deploy Hotfix
-run-name: Tag and deploy hotfix v${{ inputs.version }}
+run-name: Tag and deploy hotfix ${{ inputs.version || 'auto' }} from ${{ inputs.hotfix_branch }}
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Hotfix version number (e.g., 1.0.1)'
-        required: true
-        type: string
       hotfix_branch:
-        description: 'Hotfix branch (e.g., hotfix/v1.0.1)'
+        description: 'Hotfix branch to deploy (e.g., hotfix/v1.0.1)'
         required: true
         type: string
-      deploy_staging2:
-        description: 'Deploy to staging2'
-        type: boolean
-        default: true
+      version:
+        description: 'Version number (leave empty for auto-increment)'
         required: false
-      deploy_production:
-        description: 'Deploy to production'
-        type: boolean
-        default: true
-        required: false
-      destructive_changes:
-        description: 'Run destructive changes'
-        type: boolean
-        default: false
-        required: false
+        type: string
+      environments:
+        description: 'Target environments'
+        type: choice
+        options:
+          - staging2
+          - production
+          - both
+        default: 'staging2'
+        required: true
       merge_to_main:
         description: 'Merge hotfix to main after successful deployment'
         type: boolean
@@ -35,21 +29,52 @@ on:
         required: false
 
 jobs:
-  validate:
+  determine-version:
     runs-on: ubuntu-latest
+    outputs:
+      version_tag: ${{ (inputs.version != '' && format('v{0}', inputs.version)) || steps.auto_version.outputs.version_tag }}
     steps:
-      - name: Validate version format
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.hotfix_branch }}
+          fetch-depth: 0
+          
+      - name: Auto-determine version
+        id: auto_version
+        if: inputs.version == ''
+        run: |
+          # Extract base version from branch name
+          if [[ "${{ inputs.hotfix_branch }}" =~ hotfix/v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            
+            # Increment patch version
+            NEW_PATCH=$((PATCH + 1))
+            NEW_VERSION="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+            echo "version_tag=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "Automatically determined version: $NEW_VERSION"
+          else
+            echo "::error::Unable to determine version from branch name. Please specify version explicitly."
+            exit 1
+          fi
+      
+      - name: Validate manual version format
+        if: inputs.version != ''
         run: |
           if ! [[ ${{ inputs.version }} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Invalid version format. Must be in format X.Y.Z"
             exit 1
           fi
+          echo "Using manual version: v${{ inputs.version }}"
   
   tag-hotfix:
-    needs: validate
+    needs: determine-version
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
-      version_tag: v${{ inputs.version }}
+      version_tag: ${{ needs.determine-version.outputs.version_tag }}
     
     steps:
       - uses: actions/checkout@v4
@@ -60,8 +85,8 @@ jobs:
       - name: Create and push tag
         uses: ncipollo/release-action@v1
         with:
-          tag: v${{ inputs.version }}
-          name: Hotfix v${{ inputs.version }}
+          tag: ${{ needs.determine-version.outputs.version_tag }}
+          name: Hotfix ${{ needs.determine-version.outputs.version_tag }}
           commit: ${{ inputs.hotfix_branch }}
           generateReleaseNotes: true
           makeLatest: true
@@ -69,80 +94,69 @@ jobs:
           allowUpdates: false
           draft: false
           prerelease: true
-      
-      - name: Generate release notes
-        id: release_notes
-        run: |
-          # Extract base version from hotfix version
-          if [[ ${{ inputs.version }} =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            MAJOR="${BASH_REMATCH[1]}"
-            MINOR="${BASH_REMATCH[2]}"
-            PATCH="${BASH_REMATCH[3]}"
-            
-            # Construct base version tag
-            BASE_VERSION="v${MAJOR}.${MINOR}.0"
-            
-            # Generate changelog
-            echo "CHANGELOG<<EOF" >> $GITHUB_ENV
-            echo "## Hotfix Changes" >> $GITHUB_ENV
-            echo "" >> $GITHUB_ENV
-            echo "This is a hotfix based on $BASE_VERSION" >> $GITHUB_ENV
-            echo "" >> $GITHUB_ENV
-            git log --pretty=format:"* %s (%h)" $BASE_VERSION..HEAD >> $GITHUB_ENV
-            echo "" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-          else
-            echo "Failed to extract base version"
-            exit 1
-          fi
-      
-      - name: Create GitHub Release
-        run: |
-          echo "SIMULATED: Would create GitHub release for hotfix v${{ inputs.version }}"
-          echo "Release notes:"
-          echo "${{ env.CHANGELOG }}"
-          
-          # COMMENTED OUT FOR TESTING
-          # uses: softprops/action-gh-release@v1
-          # with:
-          #   tag_name: v${{ inputs.version }}
-          #   name: Hotfix v${{ inputs.version }}
-          #   body: ${{ env.CHANGELOG }}
-          #   draft: false
-          #   prerelease: true
 
-  deploy:
-    needs: tag-hotfix
-    if: success() && (inputs.deploy_staging2 || inputs.deploy_production)
-    uses: ./.github/workflows/deploy-salesforce.yml
-    with:
-      version_tag: v${{ inputs.version }}
-      deploy_staging2: ${{ inputs.deploy_staging2 }}
-      deploy_production: ${{ inputs.deploy_production }}
-      destructive_changes: ${{ inputs.destructive_changes }}
-    secrets: inherit
+  deploy-staging2:
+    needs: [determine-version, tag-hotfix]
+    if: inputs.environments == 'staging2' || inputs.environments == 'both'
+    runs-on: ubuntu-latest
+    environment: staging2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.determine-version.outputs.version_tag }}
+          fetch-depth: 0
+          
+      - name: Deploy to staging2
+        run: |
+          echo "SIMULATED: Would deploy ${{ needs.determine-version.outputs.version_tag }} to staging2"
+          echo "Version Tag: ${{ needs.determine-version.outputs.version_tag }}"
+          # Real deployment steps would go here
+
+  deploy-production:
+    needs: [determine-version, tag-hotfix, deploy-staging2]
+    if: inputs.environments == 'production' || inputs.environments == 'both'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.determine-version.outputs.version_tag }}
+          fetch-depth: 0
+          
+      - name: Deploy to production
+        run: |
+          echo "SIMULATED: Would deploy ${{ needs.determine-version.outputs.version_tag }} to production"
+          echo "Version Tag: ${{ needs.determine-version.outputs.version_tag }}"
+          # Real deployment steps would go here
 
   merge-to-main:
-    needs: [tag-hotfix, deploy]
+    needs: [determine-version, tag-hotfix, deploy-staging2, deploy-production]
     if: success() && inputs.merge_to_main
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+          
       - name: Merge hotfix to main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "GitHub Actions"
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
           
           # Check out main and update
           git checkout main
           git pull
           
           # Merge hotfix branch with no-ff to preserve history
-          git merge --no-ff ${{ inputs.hotfix_branch }} -m "Merge hotfix v${{ inputs.version }} to main"
+          git merge --no-ff ${{ inputs.hotfix_branch }} -m "Merge hotfix ${{ needs.determine-version.outputs.version_tag }} to main"
           
           # Push changes
           git push origin main
@@ -150,23 +164,4 @@ jobs:
       - name: Notify merge completed
         run: |
           echo "SIMULATED: Would send Slack notification about hotfix merge to main"
-          echo "Hotfix: v${{ inputs.version }}"
-          
-          # COMMENTED OUT FOR TESTING
-          # uses: slackapi/slack-github-action@v1.24.0
-          # with:
-          #   payload: |
-          #     {
-          #       "text": "Hotfix merged to main",
-          #       "blocks": [
-          #         {
-          #           "type": "section", 
-          #           "text": {
-          #             "type": "mrkdwn",
-          #             "text": "*Hotfix v${{ inputs.version }} merged to main*\nThe hotfix has been successfully deployed and merged back to the main branch."
-          #           }
-          #         }
-          #       ]
-          #     }
-          # env:
-          #   SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          echo "Hotfix: ${{ needs.determine-version.outputs.version_tag }}"
