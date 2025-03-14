@@ -20,11 +20,9 @@ on:
         default: false
         type: boolean
       base_version:
-        description: 'Base version for hotfix'
+        description: 'Base version for hotfix (e.g., v1.0.0)'
         required: false
-        type: choice
-        options:
-          - v1.0.0  # This will be automatically updated by update-release-tags.yml
+        type: string
       environments:
         description: 'Target environments'
         type: choice
@@ -39,7 +37,15 @@ on:
 jobs:
   validate-inputs:
     runs-on: ubuntu-latest
-    steps:      
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Get available tags
+        id: tags
+        uses: ./.github/actions/get-tags
+      
       - name: Validate hotfix inputs
         if: inputs.is_hotfix
         run: |
@@ -50,6 +56,14 @@ jobs:
           
           if ! [[ ${{ inputs.base_version }} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Invalid base version format. Must be in format vX.Y.Z"
+            exit 1
+          fi
+          
+          # Check if tag exists
+          TAGS='${{ steps.tags.outputs.tags }}'
+          if ! echo "$TAGS" | jq -e --arg tag "${{ inputs.base_version }}" 'contains([$tag])' > /dev/null; then
+            echo "::error::Base version ${{ inputs.base_version }} does not exist. Available versions:"
+            echo "$TAGS" | jq -r '.[]' | sed 's/^/- /'
             exit 1
           fi
 
