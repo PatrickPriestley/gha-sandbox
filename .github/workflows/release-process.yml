@@ -1,6 +1,6 @@
 # release.yml
 name: Release Process
-run-name: Create ${{ inputs.is_hotfix && 'hotfix' || 'release' }} ${{ inputs.version || format('{0}', inputs.release_type) }}
+run-name: Create ${{ inputs.is_hotfix && 'hotfix' || 'release' }} ${{ inputs.release_type }}
 
 on:
   workflow_dispatch:
@@ -14,10 +14,6 @@ on:
           - patch
           - minor
           - major
-      version:
-        description: 'Manual version number (leave empty for auto)'
-        required: false
-        type: string
       is_hotfix:
         description: 'Is this a hotfix release?'
         required: false
@@ -41,15 +37,7 @@ on:
 jobs:
   validate-inputs:
     runs-on: ubuntu-latest
-    steps:
-      - name: Validate manual version format
-        if: inputs.version != ''
-        run: |
-          if ! [[ ${{ inputs.version }} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid version format. Must be in format X.Y.Z"
-            exit 1
-          fi
-      
+    steps:      
       - name: Validate hotfix inputs
         if: inputs.is_hotfix
         run: |
@@ -67,7 +55,7 @@ jobs:
     needs: validate-inputs
     runs-on: ubuntu-latest
     outputs:
-      version_tag: ${{ (inputs.version != '' && format('v{0}', inputs.version)) || steps.tag_version.outputs.new_tag }}
+      version_tag: ${{ steps.tag_version.outputs.new_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,7 +64,6 @@ jobs:
       
       - name: Bump version and create tag
         id: tag_version
-        if: inputs.version == ''
         uses: mathieudutour/github-tag-action@v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -85,11 +72,7 @@ jobs:
           
       - name: Display determined version
         run: |
-          if [ -z "${{ inputs.version }}" ]; then
-            echo "Automatically determined version: ${{ steps.tag_version.outputs.new_tag }}"
-          else
-            echo "Using manually specified version: v${{ inputs.version }}"
-          fi
+          echo "Automatically determined version: ${{ steps.tag_version.outputs.new_tag }}"
 
   prepare-release:
     needs: determine-version
@@ -114,18 +97,18 @@ jobs:
             echo "Creating hotfix branch $BRANCH_NAME from ${{ inputs.base_version }}"
           else
             BRANCH_NAME="main"
-            echo "Using main branch"
+            echo "Using main branch for release"
           fi
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
       
       - name: Create hotfix branch if needed
         if: inputs.is_hotfix
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "GitHub Actions"
-          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
+          git remote set-url origin "https://${GITHUB_ACTOR}:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git checkout ${{ inputs.base_version }}
           git checkout -b ${{ steps.set_branch.outputs.branch_name }}
           git push -u origin ${{ steps.set_branch.outputs.branch_name }}
@@ -176,6 +159,10 @@ jobs:
         run: |
           echo "SIMULATED: Would deploy ${{ needs.determine-version.outputs.version_tag }} to staging2"
           # Real deployment steps would go here
+          
+      - name: Run tests
+        run: |
+          echo "SIMULATED: Would run tests in staging2"
 
   deploy-production:
     needs: [determine-version, prepare-release, deploy-staging2]
