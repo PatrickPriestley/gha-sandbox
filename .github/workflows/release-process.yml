@@ -20,7 +20,18 @@ on:
         default: false
         type: boolean
       base_version:
-        description: 'Base version for hotfix (e.g., v1.0.0)'
+        description: 'Base version for hotfix'
+        required: false
+        type: choice
+        options:
+          - v1.0.0
+          - v1.0.1
+          - v1.1.0
+          - v1.1.1
+          - v2.0.0
+          - custom
+      custom_base_version:
+        description: 'Custom base version (if not in dropdown)'
         required: false
         type: string
       environments:
@@ -37,6 +48,8 @@ on:
 jobs:
   validate-inputs:
     runs-on: ubuntu-latest
+    outputs:
+      base_version: ${{ steps.set-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,25 +60,34 @@ jobs:
         uses: ./.github/actions/get-tags
       
       - name: Validate hotfix inputs
+        id: set-version
         if: inputs.is_hotfix
         run: |
-          if [ -z "${{ inputs.base_version }}" ]; then
-            echo "::error::Base version is required for hotfixes"
-            exit 1
+          # Determine which version to use
+          if [ "${{ inputs.base_version }}" = "custom" ]; then
+            if [ -z "${{ inputs.custom_base_version }}" ]; then
+              echo "::error::Custom base version is required when 'custom' is selected"
+              exit 1
+            fi
+            VERSION="${{ inputs.custom_base_version }}"
+          else
+            VERSION="${{ inputs.base_version }}"
           fi
           
-          if ! [[ ${{ inputs.base_version }} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid base version format. Must be in format vX.Y.Z"
+          if ! [[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format. Must be in format vX.Y.Z"
             exit 1
           fi
           
           # Check if tag exists
           TAGS='${{ steps.tags.outputs.tags }}'
-          if ! echo "$TAGS" | jq -e --arg tag "${{ inputs.base_version }}" 'contains([$tag])' > /dev/null; then
-            echo "::error::Base version ${{ inputs.base_version }} does not exist. Available versions:"
+          if ! echo "$TAGS" | jq -e --arg tag "$VERSION" 'contains([$tag])' > /dev/null; then
+            echo "::error::Base version $VERSION does not exist. Available versions:"
             echo "$TAGS" | jq -r '.[]' | sed 's/^/- /'
             exit 1
           fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
   determine-version:
     needs: validate-inputs
@@ -91,7 +113,7 @@ jobs:
           echo "Automatically determined version: ${{ steps.tag_version.outputs.new_tag }}"
 
   prepare-release:
-    needs: determine-version
+    needs: [validate-inputs, determine-version]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -102,7 +124,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.is_hotfix && inputs.base_version || 'main' }}
+          ref: ${{ inputs.is_hotfix && needs.validate-inputs.outputs.base_version || 'main' }}
           fetch-depth: 0
       
       - name: Set branch name
@@ -110,7 +132,7 @@ jobs:
         run: |
           if [ "${{ inputs.is_hotfix }}" = "true" ]; then
             BRANCH_NAME="hotfix/${{ needs.determine-version.outputs.version_tag }}"
-            echo "Creating hotfix branch $BRANCH_NAME from ${{ inputs.base_version }}"
+            echo "Creating hotfix branch $BRANCH_NAME from ${{ needs.validate-inputs.outputs.base_version }}"
           else
             BRANCH_NAME="main"
             echo "Using main branch for release"
@@ -125,7 +147,7 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "GitHub Actions"
           git remote set-url origin "https://${GITHUB_ACTOR}:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git checkout ${{ inputs.base_version }}
+          git checkout ${{ needs.validate-inputs.outputs.base_version }}
           git checkout -b ${{ steps.set_branch.outputs.branch_name }}
           git push -u origin ${{ steps.set_branch.outputs.branch_name }}
           echo "Created and pushed hotfix branch ${{ steps.set_branch.outputs.branch_name }}"
@@ -156,7 +178,7 @@ jobs:
         run: |
           echo "SIMULATED: Would send Slack notification about hotfix branch creation"
           echo "Branch: ${{ needs.prepare-release.outputs.branch_name }}"
-          echo "Base version: ${{ inputs.base_version }}"
+          echo "Base version: ${{ needs.validate-inputs.outputs.base_version }}"
           echo "Target version: ${{ needs.determine-version.outputs.version_tag }}"
 
   deploy-staging2:
