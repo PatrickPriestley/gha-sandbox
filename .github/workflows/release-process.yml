@@ -15,25 +15,10 @@ on:
           - minor
           - major
       is_hotfix:
-        description: 'Is this a hotfix release? If yes, you will need to provide a base version.'
+        description: 'Create a hotfix from the latest release'
         required: false
         default: false
         type: boolean
-      base_version:
-        description: 'Base version for hotfix'
-        required: false
-        type: choice
-        options:
-          - v1.0.0
-          - v1.0.1
-          - v1.1.0
-          - v1.1.1
-          - v2.0.0
-          - custom
-      custom_base_version:
-        description: 'Custom base version (if not in dropdown)'
-        required: false
-        type: string
       environments:
         description: 'Target environments'
         type: choice
@@ -54,39 +39,20 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          
-      - name: Get available tags
-        id: tags
-        uses: ./.github/actions/get-tags
       
-      - name: Validate hotfix inputs
+      - name: Find latest release version
         id: set-version
         if: inputs.is_hotfix
         run: |
-          # Determine which version to use
-          if [ "${{ inputs.base_version }}" = "custom" ]; then
-            if [ -z "${{ inputs.custom_base_version }}" ]; then
-              echo "::error::Custom base version is required when 'custom' is selected"
-              exit 1
-            fi
-            VERSION="${{ inputs.custom_base_version }}"
-          else
-            VERSION="${{ inputs.base_version }}"
-          fi
+          # Get latest non-hotfix tag (assuming hotfix tags contain 'hotfix')
+          VERSION=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v 'hotfix' | head -1)
           
-          if ! [[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid version format. Must be in format vX.Y.Z"
+          if [ -z "$VERSION" ]; then
+            echo "::error::No release tags found"
             exit 1
           fi
           
-          # Check if tag exists
-          TAGS='${{ steps.tags.outputs.tags }}'
-          if ! echo "$TAGS" | jq -e --arg tag "$VERSION" 'contains([$tag])' > /dev/null; then
-            echo "::error::Base version $VERSION does not exist. Available versions:"
-            echo "$TAGS" | jq -r '.[]' | sed 's/^/- /'
-            exit 1
-          fi
-          
+          echo "Using latest release: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
   determine-version:
