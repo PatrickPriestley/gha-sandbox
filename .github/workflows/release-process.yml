@@ -20,9 +20,11 @@ on:
         default: false
         type: boolean
       base_version:
-        description: 'Base version for hotfix (required if hotfix is selected)'
+        description: 'Base version for hotfix'
         required: false
-        type: string
+        type: choice
+        options:
+          - v1.0.0  # This will be automatically updated by update-release-tags.yml
       environments:
         description: 'Target environments'
         type: choice
